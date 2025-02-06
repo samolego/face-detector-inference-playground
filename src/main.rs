@@ -24,27 +24,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load image
     let image_path = std::env::args().nth(1).expect("Image path is required");
 
-    // Load image
     println!("Loading image");
     let image = image::open(image_path)?;
     let resized_image = image.resize_exact(640, 640, FilterType::CatmullRom);
 
-    // Retrieve dimensions from resized_image before cloning or moving it
+    // Retrieve dimensions from resized_image
     let original_width = resized_image.width() as f32;
     let original_height = resized_image.height() as f32;
 
-    // Clone resized_image for inference before converting it
-    let image_input = resized_image.clone().into_rgb32f();
-
-    // Use the original resized_image for drawing
+    // Keep a copy to draw on
     let mut output_image = resized_image.to_rgb8();
 
+    // Instead of converting with into_rgb32f(), convert to 8-bit then to f32.
+    let image_input = resized_image.to_rgb8();
     let mut normalized_input = Vec::with_capacity(input_shape.iter().product());
-    for pixel in image_input.into_raw() {
+    for byte in image_input.into_raw() {
+        let pixel = byte as f32;
         normalized_input.push((pixel - 127.5) / 128.0);
     }
 
-    // Reshape to desired input shape
     let input_array = Array::from_shape_vec(input_shape, normalized_input).unwrap();
 
     println!("Starting inference");
@@ -58,9 +56,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bboxes16 = result[4].try_extract_tensor::<f32>()?;
     let bboxes32 = result[5].try_extract_tensor::<f32>()?;
 
-    let confidence_threshold = 0.025;
+    let confidence_threshold = 0.16;
 
-    // Convert tensors to appropriate views
     let mut process_scale = |scores: &[f32],
                              bboxes: &[f32],
                              shape: &[usize]|
@@ -78,7 +75,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
     };
 
-    // Process each scale
     let scores08_slice = scores08.as_slice().ok_or("Failed to get scores08 slice")?;
     let bboxes08_slice = bboxes08.as_slice().ok_or("Failed to get bboxes08 slice")?;
     process_scale(scores08_slice, bboxes08_slice, &[scores08.shape()[0], 1])?;
@@ -108,7 +104,6 @@ fn process_detections(
         let confidence = scores[[i, 0]];
 
         if confidence > confidence_threshold {
-            // The model outputs center_x, center_y, width, height
             let center_x = bboxes[[i, 0]];
             let center_y = bboxes[[i, 1]];
             let width = bboxes[[i, 2]];
@@ -116,13 +111,11 @@ fn process_detections(
 
             println!("Detection. Confidence: {confidence}, center_x: {center_x}, center_y: {center_y}, width: {width}, height: {height}");
 
-            // Convert to corner coordinates
             let x1 = (center_x - width / 2.0) * original_width;
             let y1 = (center_y - height / 2.0) * original_height;
             let x2 = (center_x + width / 2.0) * original_width;
             let y2 = (center_y + height / 2.0) * original_height;
 
-            // Ensure coordinates are within bounds
             let x1 = x1.max(0.0).min(original_width) as u32;
             let y1 = y1.max(0.0).min(original_height) as u32;
             let x2 = x2.max(0.0).min(original_width) as u32;
@@ -137,7 +130,6 @@ fn process_detections(
 fn draw_rectangle(image: &mut RgbImage, x1: u32, y1: u32, x2: u32, y2: u32) {
     let color = Rgb([255, 0, 0]);
 
-    // Draw horizontal lines
     for x in x1..=x2 {
         if x < image.width() && y1 < image.height() {
             image.put_pixel(x, y1, color);
@@ -147,7 +139,6 @@ fn draw_rectangle(image: &mut RgbImage, x1: u32, y1: u32, x2: u32, y2: u32) {
         }
     }
 
-    // Draw vertical lines
     for y in y1..=y2 {
         if x1 < image.width() && y < image.height() {
             image.put_pixel(x1, y, color);
