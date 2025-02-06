@@ -1,5 +1,5 @@
-use image::{imageops::FilterType, Rgb, RgbImage};
-use ndarray::{Array, Array2, ArrayView, ArrayView2};
+use image::{imageops::FilterType, GenericImageView, Rgb, RgbImage};
+use ndarray::Array;
 use ort::{inputs, CPUExecutionProvider, GraphOptimizationLevel, Session};
 
 pub mod models;
@@ -21,29 +21,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Model loaded");
 
-    // Load image
     let image_path = std::env::args().nth(1).expect("Image path is required");
-
     println!("Loading image");
-    let image = image::open(image_path)?;
-    let resized_image = image.resize_exact(640, 640, FilterType::CatmullRom);
+    let img = image::open(image_path)?;
+    let resized = img.resize_exact(640, 640, FilterType::CatmullRom);
+    let mut output_image = resized.to_rgb8();
 
-    // Retrieve dimensions from resized_image
-    let original_width = resized_image.width() as f32;
-    let original_height = resized_image.height() as f32;
+    let rgb_image = resized.to_rgb8();
+    let raw = rgb_image.into_raw();
+    let mut input_data = Vec::with_capacity(640 * 640 * 3);
 
-    // Keep a copy to draw on
-    let mut output_image = resized_image.to_rgb8();
-
-    // Instead of converting with into_rgb32f(), convert to 8-bit then to f32.
-    let image_input = resized_image.to_rgb8();
-    let mut normalized_input = Vec::with_capacity(input_shape.iter().product());
-    for byte in image_input.into_raw() {
-        let pixel = byte as f32;
-        normalized_input.push((pixel - 127.5) / 128.0);
+    for pixel in raw.chunks(3) {
+        input_data.push(pixel[2] as f32);
+        input_data.push(pixel[1] as f32);
+        input_data.push(pixel[0] as f32);
     }
 
-    let input_array = Array::from_shape_vec(input_shape, normalized_input).unwrap();
+    let input_array = Array::from_shape_vec(input_shape, input_data).unwrap();
 
     println!("Starting inference");
     let result = model.run(inputs!["input.1" => input_array.view()]?)?;
@@ -56,95 +50,94 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bboxes16 = result[4].try_extract_tensor::<f32>()?;
     let bboxes32 = result[5].try_extract_tensor::<f32>()?;
 
-    let confidence_threshold = 0.16;
+    let confidence_threshold = 0.84;
 
     let mut process_scale = |scores: &[f32],
                              bboxes: &[f32],
                              shape: &[usize]|
      -> Result<(), Box<dyn std::error::Error>> {
-        let scores_array = Array2::from_shape_vec([shape[0], 1], scores.to_vec())?;
-        let bboxes_array = Array2::from_shape_vec([shape[0], 4], bboxes.to_vec())?;
+        let num_boxes = shape[0];
+        for i in 0..num_boxes {
+            let confidence = scores[i];
+            if confidence > confidence_threshold {
+                // The model outputs normalized coordinates, multiply by 640 to get pixel coordinates
+                let center_x = bboxes[i * 4 + 0] * 640.0;
+                let center_y = bboxes[i * 4 + 1] * 640.0;
+                let width = bboxes[i * 4 + 2] * 640.0;
+                let height = bboxes[i * 4 + 3] * 640.0;
 
-        process_detections(
-            scores_array.view(),
-            bboxes_array.view(),
-            confidence_threshold,
-            &mut output_image,
-            original_width,
-            original_height,
-        )
+                println!("Detection. Confidence: {confidence}, center_x: {center_x}, center_y: {center_y}, width: {width}, height: {height}");
+
+                let x1 = (center_x - width / 2.0).max(0.0) as u32;
+                let y1 = (center_y - height / 2.0).max(0.0) as u32;
+                let x2 = (center_x + width / 2.0) as u32;
+                let y2 = (center_y + height / 2.0) as u32;
+
+                let img_width = output_image.width();
+                let img_height = output_image.height();
+                let x1 = x1.min(img_width - 1);
+                let y1 = y1.min(img_height - 1);
+                let x2 = x2.min(img_width - 1);
+                let y2 = y2.min(img_height - 1);
+
+                draw_rectangle(&mut output_image, x1, y1, x2, y2);
+            }
+        }
+        Ok(())
     };
 
     let scores08_slice = scores08.as_slice().ok_or("Failed to get scores08 slice")?;
     let bboxes08_slice = bboxes08.as_slice().ok_or("Failed to get bboxes08 slice")?;
-    process_scale(scores08_slice, bboxes08_slice, &[scores08.shape()[0], 1])?;
+    process_scale(scores08_slice, bboxes08_slice, &[scores08.len(), 1])?;
 
     let scores16_slice = scores16.as_slice().ok_or("Failed to get scores16 slice")?;
     let bboxes16_slice = bboxes16.as_slice().ok_or("Failed to get bboxes16 slice")?;
-    process_scale(scores16_slice, bboxes16_slice, &[scores16.shape()[0], 1])?;
+    process_scale(scores16_slice, bboxes16_slice, &[scores16.len(), 1])?;
 
     let scores32_slice = scores32.as_slice().ok_or("Failed to get scores32 slice")?;
     let bboxes32_slice = bboxes32.as_slice().ok_or("Failed to get bboxes32 slice")?;
-    process_scale(scores32_slice, bboxes32_slice, &[scores32.shape()[0], 1])?;
+    process_scale(scores32_slice, bboxes32_slice, &[scores32.len(), 1])?;
 
     output_image.save("output.jpg")?;
 
     Ok(())
 }
 
-fn process_detections(
-    scores: ArrayView2<f32>,
-    bboxes: ArrayView2<f32>,
-    confidence_threshold: f32,
-    output_image: &mut RgbImage,
-    original_width: f32,
-    original_height: f32,
-) -> Result<(), Box<dyn std::error::Error>> {
-    for i in 0..bboxes.shape()[0] {
-        let confidence = scores[[i, 0]];
-
-        if confidence > confidence_threshold {
-            let center_x = bboxes[[i, 0]];
-            let center_y = bboxes[[i, 1]];
-            let width = bboxes[[i, 2]];
-            let height = bboxes[[i, 3]];
-
-            println!("Detection. Confidence: {confidence}, center_x: {center_x}, center_y: {center_y}, width: {width}, height: {height}");
-
-            let x1 = (center_x - width / 2.0) * original_width;
-            let y1 = (center_y - height / 2.0) * original_height;
-            let x2 = (center_x + width / 2.0) * original_width;
-            let y2 = (center_y + height / 2.0) * original_height;
-
-            let x1 = x1.max(0.0).min(original_width) as u32;
-            let y1 = y1.max(0.0).min(original_height) as u32;
-            let x2 = x2.max(0.0).min(original_width) as u32;
-            let y2 = y2.max(0.0).min(original_height) as u32;
-
-            draw_rectangle(output_image, x1, y1, x2, y2);
-        }
-    }
-    Ok(())
-}
-
 fn draw_rectangle(image: &mut RgbImage, x1: u32, y1: u32, x2: u32, y2: u32) {
     let color = Rgb([255, 0, 0]);
+    let thickness = 3; // Number of pixels thick
 
-    for x in x1..=x2 {
-        if x < image.width() && y1 < image.height() {
-            image.put_pixel(x, y1, color);
-        }
-        if x < image.width() && y2 < image.height() {
-            image.put_pixel(x, y2, color);
+    // Draw horizontal lines with thickness
+    for dy in 0..thickness {
+        let y1_thick = y1.saturating_add(dy);
+        let y2_thick = y2.saturating_add(dy);
+
+        for x in x1..=x2 {
+            if x < image.width() {
+                if y1_thick < image.height() {
+                    image.put_pixel(x, y1_thick, color);
+                }
+                if y2_thick < image.height() {
+                    image.put_pixel(x, y2_thick, color);
+                }
+            }
         }
     }
 
-    for y in y1..=y2 {
-        if x1 < image.width() && y < image.height() {
-            image.put_pixel(x1, y, color);
-        }
-        if x2 < image.width() && y < image.height() {
-            image.put_pixel(x2, y, color);
+    // Draw vertical lines with thickness
+    for dx in 0..thickness {
+        let x1_thick = x1.saturating_add(dx);
+        let x2_thick = x2.saturating_add(dx);
+
+        for y in y1..=y2 {
+            if y < image.height() {
+                if x1_thick < image.width() {
+                    image.put_pixel(x1_thick, y, color);
+                }
+                if x2_thick < image.width() {
+                    image.put_pixel(x2_thick, y, color);
+                }
+            }
         }
     }
 }
