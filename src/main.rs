@@ -33,13 +33,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let height = 640;
     let mut input_data = Vec::with_capacity(width * height * 3);
 
-    // Rearrange data from HWC to CHW without swapping channels.
-    // The image crate yields RGB so channel 0 will be R, channel 1 G, channel 2 B.
+    // Match Python's preprocessing:
+    // blob = cv2.dnn.blobFromImage(img, 1.0/self.input_std, input_size,
+    //     (self.input_mean, self.input_mean, self.input_mean), swapRB=True)
+    // where input_std = 128.0 and input_mean = 127.5
     for c in 0..3 {
         for i in 0..height {
             for j in 0..width {
                 let index = (i * width + j) * 3;
-                input_data.push(raw[index + c] as f32);
+                let pixel_value = raw[index + c] as f32;
+                // Normalize using the same values as Python
+                input_data.push((pixel_value - 127.5) / 128.0);
             }
         }
     }
@@ -57,30 +61,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bboxes16 = result[4].try_extract_tensor::<f32>()?;
     let bboxes32 = result[5].try_extract_tensor::<f32>()?;
 
-    let confidence_threshold = 0.9;
+    let confidence_threshold = 0.5;
 
     // Revised decode_box without using +1 for widths/heights.
-    fn decode_box(anchor: [f32; 4], deltas: [f32; 4]) -> [f32; 4] {
-        // Compute anchor dimensions without adding 1.
-        let anchor_w = anchor[2] - anchor[0];
-        let anchor_h = anchor[3] - anchor[1];
-        let anchor_ctr_x = anchor[0] + anchor_w / 2.0;
-        let anchor_ctr_y = anchor[1] + anchor_h / 2.0;
+    fn decode_box(points: [f32; 2], distance: [f32; 4]) -> [f32; 4] {
+        // Python equivalent of distance2bbox:
+        // x1 = points[:, 0] - distance[:, 0]
+        // y1 = points[:, 1] - distance[:, 1]
+        // x2 = points[:, 0] + distance[:, 2]
+        // y2 = points[:, 1] + distance[:, 3]
 
-        let dx = deltas[0];
-        let dy = deltas[1];
-        let dw = deltas[2];
-        let dh = deltas[3];
-
-        let pred_ctr_x = dx * anchor_w + anchor_ctr_x;
-        let pred_ctr_y = dy * anchor_h + anchor_ctr_y;
-        let pred_w = dw.exp() * anchor_w;
-        let pred_h = dh.exp() * anchor_h;
-
-        let x1 = pred_ctr_x - pred_w / 2.0;
-        let y1 = pred_ctr_y - pred_h / 2.0;
-        let x2 = pred_ctr_x + pred_w / 2.0;
-        let y2 = pred_ctr_y + pred_h / 2.0;
+        let x1 = points[0] - distance[0];
+        let y1 = points[1] - distance[1];
+        let x2 = points[0] + distance[2];
+        let y2 = points[1] + distance[3];
 
         [x1, y1, x2, y2]
     }
@@ -112,28 +106,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for cell in 0..cells {
             let row = cell as u32 / grid_size;
             let col = cell as u32 % grid_size;
-            let cx = (col as f32) * (stride as f32) + (stride as f32) / 2.0;
-            let cy = (row as f32) * (stride as f32) + (stride as f32) / 2.0;
+
             for a in 0..num_anchors {
                 let index = cell * num_anchors + a;
                 let confidence = scores[index];
                 if confidence > confidence_threshold {
-                    let scale = scales[a];
-                    let anchor_size = base_size * scale;
-                    let anchor = [
-                        cx - anchor_size / 2.0,
-                        cy - anchor_size / 2.0,
-                        cx + anchor_size / 2.0,
-                        cy + anchor_size / 2.0,
-                    ];
+                    // Generate grid points (matching Python's anchor_centers generation)
+                    let cx = (col as f32) * (stride as f32);
+                    let cy = (row as f32) * (stride as f32);
+
+                    // Get bbox predictions
                     let start = index * 4;
-                    let deltas = [
-                        bboxes[start + 0],
-                        bboxes[start + 1],
-                        bboxes[start + 2],
-                        bboxes[start + 3],
+                    // Scale the entire bbox predictions by stride
+                    let scaled_deltas = [
+                        bboxes[start + 0] * (stride as f32),
+                        bboxes[start + 1] * (stride as f32),
+                        bboxes[start + 2] * (stride as f32),
+                        bboxes[start + 3] * (stride as f32),
                     ];
-                    let decoded = decode_box(anchor, deltas);
+
+                    // Also scale the center points by stride to match Python's behavior
+                    let scaled_points = [cx, cy];
+                    let decoded = decode_box(scaled_points, scaled_deltas);
 
                     println!(
                         "Detection (stride {}): Conf: {:.4}, decoded_box: [{:.1}, {:.1}, {:.1}, {:.1}]",
