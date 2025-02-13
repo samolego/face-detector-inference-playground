@@ -1,0 +1,16 @@
+[package]
+name = "face-detection-rs"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ort = "2.0.0-rc.6"
+image = "0.25.2"
+ndarray = "0.16.1"
+candle-core = "0.7.2"
+candle-nn = "0.7.2"
+candle-onnx = "0.7.2"
+clap = { version = "4.4", features = ["derive"] }
+
+[build-dependencies]
+burn-import = "0.15.0"
