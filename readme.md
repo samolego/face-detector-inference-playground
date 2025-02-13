@@ -1,10 +1,13 @@
 
-# Face Detection using Buffalo model in Rust
+# Face Detection inference tool
 
 **Warning: this is just a toy project for playing around with buffalo face recognition model.**
 
-A ~~blazingly-fast~~  face detection tool built in Rust using ONNX Runtime.
+A ~~blazingly-fast~~ face detection inference tool built in Rust using ONNX Runtime.
 This tool can process both single images and directories of images, providing flexible output options for detection results.
+
+![img/sample.jpg](img/sample.jpg)
+![img/output.jpg](img/output.jpg)
 
 ### Building from source
 
@@ -19,6 +22,7 @@ cargo build --release
 Obtain [buffalo model from InsightFace](https://github.com/deepinsight/insightface/releases).
 Note: this was tested with buffalo_l.
 Extract the det_10g.onnx file from the downloaded zip file and place it in the same directory as the executable.
+Prepare your images (note: 640x640 is recommended) and run the tool.
 
 ### Basic Command Structure
 
@@ -32,6 +36,7 @@ face-detection -i <INPUT> [-o <OUTPUT>] [-t <THRESHOLD>] [-v]
 - `-o, --output <PATH>`: Output file or directory path (optional)
 - `-t, --threshold <FLOAT>`: Detection confidence threshold (default: 0.5)
 - `-v, --verbose`: Print detection details to console
+- `-m, --model`: Model ONNX file path (default: det_10g.onnx)
 - `-h, --help`: Show help information
 - `-V, --version`: Show version information
 
